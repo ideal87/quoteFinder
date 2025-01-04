@@ -9,7 +9,7 @@ import re
 from difflib import SequenceMatcher
 
 # Initialize the model
-model = ChatOpenAI(model="gpt-4o")
+model = ChatOpenAI(model="gpt-4o-mini")
 
 # Streamlit UI
 st.title("Demo: PDF Quote Finder with RAG")
@@ -107,10 +107,9 @@ if query and "vector_store" in st.session_state:  # Ensure vector store exists
 
         # Define the prompt template
         prompt_template = """
-        Please find the most relevant sentences from the context provided that match the human input based on meaning. 
-        Note that the human input may be a translation back to English from Korean, so the wording might differ from the original English text.
-        Focus on the semantic meaning and use your understanding of paraphrasing to identify matching sentences, even if the wording is different.
-        Please clean up any line break characters in your response and enclose it in double quotations. Do not add an introduction or conclusion in your response. 
+        You are a helpful assistant finding possible citation from the context based on a human input. 
+        Please do your best to find sentences from the context which has simliar meaning to the human input.
+        Clean up any line break characters in your response and enclose it in double quotations without any introduction. 
         If no matching lines are found, respond with 'No matching quote found'.
 
         Human Input: {question}
