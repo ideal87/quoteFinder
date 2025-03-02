@@ -1,137 +1,154 @@
 import streamlit as st
-from langchain_openai import ChatOpenAI
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
-from langchain_core.vectorstores import InMemoryVectorStore
-import tempfile
+import time
 import re
-from difflib import SequenceMatcher
+import os
+from openai import OpenAI
 
-# Initialize the model
-model = ChatOpenAI(model="gpt-4o-mini")
+# Initialize the OpenAI client
+client = OpenAI()
 
-# Streamlit UI
-st.title("Demo: PDF Quote Finder with RAG")
+# Your assistant ID
+ASSISTANT_ID = "asst_4IzrVrEAu46wXeBsmorjLSQC"
 
-# File upload
-uploaded_file = st.file_uploader("Upload a PDF file", type="pdf")
+def interact_with_assistant(user_message):
+    """
+    Interact with the OpenAI assistant using beta threads.
+    """
+    for attempt in range(2):
+        thread = None
+        try:
+            # Create a new thread for each attempt
+            thread = client.beta.threads.create()
+            st.write(f"Attempt {attempt+1}: Created thread {thread.id}")
 
-# Slider for chunk size between 100 and 5000
-chunk_size = st.slider("Select chunk size", min_value=100, max_value=5000, value=2000, step=100)
+            # Add message to the thread
+            client.beta.threads.messages.create(
+                thread_id=thread.id,
+                role="user",
+                content=user_message
+            )
 
-# State for uploaded file and chunk size
-if uploaded_file:
-    # Check if the file has changed or if chunk size has changed
-    if "uploaded_file_name" not in st.session_state or st.session_state.uploaded_file_name != uploaded_file.name or "chunk_size" not in st.session_state or st.session_state.chunk_size != chunk_size:
-        
-        # Save the uploaded file to a temporary location
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
-            temp_file.write(uploaded_file.read())
-            temp_file_path = temp_file.name
+            # Create a run for the thread
+            run = client.beta.threads.runs.create(
+                thread_id=thread.id,
+                assistant_id=ASSISTANT_ID
+            )
+            st.write(f"Run {run.id} created. Waiting...")
 
-        # Load and chunk contents of the PDF
-        loader = PyPDFLoader(temp_file_path)
-        docs = loader.load()
+            # Increase timeout to 30 seconds and use exponential backoff
+            timeout = 10
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                run_status = client.beta.threads.runs.retrieve(
+                    thread_id=thread.id,
+                    run_id=run.id
+                )
 
-        # Dynamically recalculate overlap
-        chunk_overlap = int(chunk_size * 0.2)
+                if run_status.status == "completed":
+                    st.write(f"Run completed in {int(time.time()-start_time)}s")
+                    messages = client.beta.threads.messages.list(thread.id)
+                    for msg in messages.data:
+                        if msg.role == "assistant":
+                            return msg.content[0].text.value
+                    return None
 
-        # Split documents into chunks using the selected chunk size from the slider
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        all_splits = text_splitter.split_documents(docs)
-        
-        # Store chunks in session state
-        st.session_state.all_splits = all_splits
-        st.session_state.chunk_size = chunk_size
-        st.session_state.uploaded_file_name = uploaded_file.name
+                # Check for terminal states
+                if run_status.status in ["failed", "cancelled", "expired"]:
+                    st.write(f"Run terminated with status: {run_status.status}")
+                    break
 
-        # Initialize embeddings and vector store
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        vector_store = InMemoryVectorStore(embeddings)
-        
-        # Add documents to vector store
-        vector_store.add_documents(documents=all_splits)
-        
-        # Store the vector store in session state
-        st.session_state.vector_store = vector_store
+                time.sleep(min(2**attempt, 4))  # Exponential backoff
 
-        st.success(f"Number of chunks created: {len(all_splits)}")
-        st.info("PDF content has been indexed for retrieval.")
+            # Clean up thread if not completed
+            if run_status.status != "completed":
+                st.write(f"Deleting unfinished thread {thread.id}")
+                client.beta.threads.delete(thread.id)
+            
+        except Exception as e:
+            st.write(f"Attempt {attempt+1} error: {str(e)}")
+            if thread:
+                client.beta.threads.delete(thread.id)
+            if attempt == 1:
+                return None
+        finally:
+            if thread and run_status.status == "completed":
+                try:
+                    client.beta.threads.delete(thread.id)
+                except Exception as e:
+                    st.write(f"Error cleaning up thread: {str(e)}")
 
-# State management for query and response
-if "response" not in st.session_state:
-    st.session_state.response = None
+    return None
 
-# Query input field
-query = st.text_input("Enter your query:")
+def process_srt(content):
+    """
+    Process the SRT content by replacing long quotes in the English lines
+    with the assistant's output.
+    """
+    blocks = re.split(r'\n\n+', content.strip())
+    processed_blocks = []
+    total_blocks = len(blocks)
+    
+    for i, block in enumerate(blocks):
+        lines = block.split('\n')
+        if len(lines) < 3:
+            # Skip blocks without at least header, timestamp, and content
+            continue
 
-# Function to highlight matching sentences in the top result
-def highlight_matching_lines(response_text, top_result_text, threshold=0.7):
-    # Split the texts into sentences
-    top_result_sentences = re.split(r'(?<=[\.\?\!])\s+', top_result_text)
-    response_sentences = re.split(r'(?<=[\.\?\!])\s+', response_text)
+        header, timestamp, *content_lines = lines
+        # Assume first content line is Korean and the rest form the English line.
+        korean = content_lines[0]
+        english_line = ' '.join(content_lines[1:]).strip()
 
-    highlighted_result = ''
-    for top_sentence in top_result_sentences:
-        # Initialize match_found as False
-        match_found = False
-        for response_sentence in response_sentences:
-            # Clean up the sentences by stripping whitespace
-            top_sentence_clean = top_sentence.strip()
-            response_sentence_clean = response_sentence.strip()
-            # Compute the similarity ratio
-            ratio = SequenceMatcher(None, top_sentence_clean, response_sentence_clean).ratio()
-            if ratio >= threshold:
-                match_found = True
-                break  # Break since we've found a matching sentence
+        if not english_line:
+            continue
 
-        if match_found:
-            # Highlight the matching sentence
-            highlighted_result += f"<span style='background-color: yellow;'>{top_sentence}</span> "
+        st.write(f"Processing block {i+1}/{total_blocks}...")
+        quotes = re.findall(r'"([^"]*)"', english_line)
+        replacement_occurred = False
+
+        for quote in quotes:
+            if len(quote) < 40:
+                st.write(f"Skipping short quote ({len(quote)} characters): {quote}")
+                continue            
+
+            replacement = interact_with_assistant(quote)
+            if replacement:
+                english_line = english_line.replace(f'"{quote}"', f'"{replacement}"')
+                replacement_occurred = True
+
+        if replacement_occurred:
+            new_block = f"{header}\n{timestamp}\n{korean}\n{english_line}"
+            processed_blocks.append(new_block)
         else:
-            highlighted_result += f"{top_sentence} "
+            st.write(f"No replacements in block {i+1}, skipping.")
 
-    return highlighted_result
+    return '\n\n'.join(processed_blocks)
 
-if query and "vector_store" in st.session_state:  # Ensure vector store exists
-    # Retrieve relevant documents based on the query
-    retrieved_docs = st.session_state.vector_store.similarity_search_with_score(query, k=1)
+def main():
+    st.title("SRT Processor with OpenAI Assistant")
+    st.write("Upload an SRT file to process quotes using the OpenAI assistant.")
 
-    if retrieved_docs:
-        doc, score = retrieved_docs[0]
-        metadata = doc.metadata
+    uploaded_file = st.file_uploader("Choose an SRT file", type=["srt"])
+    
+    if uploaded_file is not None:
+        # Read file content as a string
+        content = uploaded_file.read().decode('utf-8')
+        st.text_area("File Content", content, height=300)
         
-        # Prepare the context for the prompt
-        context = doc.page_content
+        if st.button("Process File"):
+            with st.spinner("Processing..."):
+                processed_content = process_srt(content)
+            
+            if processed_content:
+                st.success("Processing complete!")
+                st.download_button(
+                    label="Download Processed SRT",
+                    data=processed_content,
+                    file_name="processed_reference.srt",
+                    mime="text/plain"
+                )
+            else:
+                st.error("No replacements were made. The processed file is empty or unchanged.")
 
-        # Define the prompt template
-        prompt_template = """
-        You are a helpful assistant finding possible citation from the context based on a human input. 
-        Please do your best to find sentences from the context which has simliar meaning to the human input.
-        Clean up any line break characters in your response and enclose it in double quotations without any introduction. 
-        If no matching lines are found, respond with 'No matching quote found'.
-
-        Human Input: {question}
-
-        Context: {context}
-
-        Answer:
-        """
-        formatted_prompt = prompt_template.format(question=query, context=context)
-
-        # Generate the response
-        response = model.invoke(formatted_prompt)
-        st.session_state.response = response.content
-
-        # Highlight matching sentences in the top result
-        highlighted_top_result = highlight_matching_lines(response.content, doc.page_content)
-
-        st.write("### Quote:")
-        st.write(st.session_state.response)
-        st.write("### Top Result:")
-        st.markdown(highlighted_top_result, unsafe_allow_html=True)
-        st.write(f"**Score:** {score:.4f} \t**Page:** {metadata['page'] + 1}")
-
-    else:
-        st.write("No relevant documents found.")
+if __name__ == "__main__":
+    main()
