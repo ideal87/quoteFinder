@@ -125,8 +125,8 @@ def process_srt(content):
     return '\n\n'.join(processed_blocks)
 
 def main():
-    st.title("SRT Processor with OpenAI Assistant")
-    st.write("Upload an SRT file to process quotes using the OpenAI assistant.")
+    st.title("Vine Quote Reference Finder")
+    st.write("Upload an SRT file to retrieve quotes using the OpenAI assistant.")
 
     uploaded_file = st.file_uploader("Choose an SRT file", type=["srt"])
     
