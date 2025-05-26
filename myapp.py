@@ -36,7 +36,7 @@ def interact_with_assistant(user_message):
             st.write(f"Run {run.id} created. Waiting...")
 
             # Increase timeout to 30 seconds and use exponential backoff
-            timeout = 10
+            timeout = 20
             start_time = time.time()
             while time.time() - start_time < timeout:
                 run_status = client.beta.threads.runs.retrieve(
@@ -49,7 +49,9 @@ def interact_with_assistant(user_message):
                     messages = client.beta.threads.messages.list(thread.id)
                     for msg in messages.data:
                         if msg.role == "assistant":
-                            return msg.content[0].text.value
+                            response = msg.content[0].text.value
+                            st.write(f"Assistant response: {response}")  # CHANGED: immediate output
+                            return response
                     return None
 
                 # Check for terminal states
@@ -108,7 +110,7 @@ def process_srt(content):
 
         for quote in quotes:
             if len(quote) < 40:
-                st.write(f"Skipping short quote ({len(quote)} characters): {quote}")
+                # st.write(f"Skipping short quote ({len(quote)} characters): {quote}")
                 continue            
 
             replacement = interact_with_assistant(quote)
